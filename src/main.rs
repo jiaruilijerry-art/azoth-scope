@@ -19,7 +19,12 @@ fn main() {
             );
         }
         match oled::Display::open() {
-            Ok(d) => println!("M701: {} (no image uploaded)", d.link),
+            Ok(d) => println!(
+                "M701: {} · battery {} (no image uploaded)",
+                d.link,
+                d.battery()
+                    .map_or_else(|| "N/A".into(), |v| format!("{v}%"))
+            ),
             Err(e) => println!("M701: {e}"),
         };
         return;

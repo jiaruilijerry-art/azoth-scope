@@ -355,7 +355,12 @@ unsafe fn status(h: HWND) {
     let a = state();
     let s = a.0.lock().unwrap();
     let l = s.pref.language;
-    let text = s.status.text(l);
+    let level = s.battery.map_or_else(|| "—".into(), |v| format!("{v}%"));
+    let text = format!(
+        "{}   ·   {} {level}",
+        s.status.text(l),
+        l.pick("键盘电量", "Keyboard battery")
+    );
     drop(s);
     SetWindowTextW(GetDlgItem(h, STATUS as i32), w(&text).as_ptr());
 }

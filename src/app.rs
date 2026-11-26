@@ -61,6 +61,7 @@ pub struct State {
     pub picture: Frame,
     pub bands: frame::Bands,
     pub legend: Option<frame::Legend>,
+    pub battery: Option<u8>,
     pub generation: u64,
     pub status: OutputStatus,
     pub stop: bool,
@@ -92,6 +93,7 @@ impl State {
             self.legend = (!self.pref.hide_names).then(|| frame::Legend {
                 first: rows[0].0.into(),
                 second: rows.get(1).map(|r| r.0.into()),
+                battery: self.battery,
             });
             self.picture = if self.split_line() {
                 frame::split_lines(rows[0].1, rows[1].1, self.legend.as_ref(), window)
@@ -105,6 +107,7 @@ impl State {
             };
         } else {
             self.picture = frame::render(&rows, self.pref.surface, window);
+            frame::battery_badge(&mut self.picture, self.battery);
         }
         self.generation += 1;
     }
@@ -146,6 +149,7 @@ pub fn start() -> (Shared, Vec<JoinHandle<()>>) {
         picture: vec![],
         bands: [0; 26],
         legend: None,
+        battery: None,
         generation: 0,
         status: OutputStatus::Waiting,
         stop: false,
@@ -192,7 +196,8 @@ pub fn start() -> (Shared, Vec<JoinHandle<()>>) {
     });
     let a = shared.clone();
     let output = thread::spawn(move || {
-        let mut display = None;
+        let mut display: Option<oled::Display> = None;
+        let mut poll_at = Instant::now();
         let mut seen = 0;
         let mut next = Instant::now();
         loop {
@@ -204,7 +209,55 @@ pub fn start() -> (Shared, Vec<JoinHandle<()>>) {
                 display = None;
                 seen = 0;
                 s.status = OutputStatus::Paused;
-                let _s = a.1.wait_while(s, |s| !s.stop && !s.pref.enabled).unwrap();
+                if Instant::now() < poll_at {
+                    let _s =
+                        a.1.wait_timeout_while(
+                            s,
+                            poll_at.saturating_duration_since(Instant::now()),
+                            |s| !s.stop && !s.pref.enabled,
+                        )
+                        .unwrap();
+                    continue;
+                }
+            }
+            if s.pref.enabled && display.is_none() {
+                if next > Instant::now() {
+                    let _s =
+                        a.1.wait_timeout(s, next.saturating_duration_since(Instant::now()))
+                            .unwrap();
+                    continue;
+                }
+                drop(s);
+                match oled::Display::open() {
+                    Ok(dev) => {
+                        display = Some(dev);
+                        poll_at = Instant::now();
+                    }
+                    Err(e) => {
+                        let mut s = a.0.lock().unwrap();
+                        if s.battery.take().is_some() {
+                            s.draw();
+                        }
+                        s.status = OutputStatus::Retry(e);
+                        next = Instant::now() + Duration::from_secs(5);
+                    }
+                }
+                continue;
+            }
+            if Instant::now() >= poll_at && (!s.pref.enabled || display.is_some()) {
+                drop(s);
+                // Serialize queries with image transfers. In preview-only mode,
+                // release the control handle as soon as the battery read finishes.
+                let value = match &display {
+                    Some(d) => d.battery(),
+                    None => oled::Display::open().ok().and_then(|d| d.battery()),
+                };
+                poll_at = Instant::now() + Duration::from_secs(30);
+                let mut s = a.0.lock().unwrap();
+                if s.battery != value {
+                    s.battery = value;
+                    s.draw();
+                }
                 continue;
             }
             let split = s.split_line();
@@ -226,9 +279,6 @@ pub fn start() -> (Shared, Vec<JoinHandle<()>>) {
             seen = s.generation;
             drop(s);
             let result = (|| {
-                if display.is_none() {
-                    display = Some(oled::Display::open()?);
-                }
                 let dev = display.as_mut().unwrap();
                 if let Some(f) = f {
                     if split {
@@ -262,6 +312,9 @@ pub fn start() -> (Shared, Vec<JoinHandle<()>>) {
                 }
                 Err(e) => {
                     display = None;
+                    if s.battery.take().is_some() {
+                        s.draw();
+                    }
                     s.status = OutputStatus::Retry(e);
                     next = Instant::now() + Duration::from_secs(5);
                 }

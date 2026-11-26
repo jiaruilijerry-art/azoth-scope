@@ -133,6 +133,7 @@ pub unsafe fn dashboard(h: HWND) {
     let l = s.pref.language;
     let timing = s.pref.timing;
     let pix = s.picture.clone();
+    let battery = s.battery;
     let (i, j) = s.indices();
     let dual = !s.pref.one;
     let metrics = [i, j].map(|i| {
@@ -175,6 +176,23 @@ pub unsafe fn dashboard(h: HWND) {
         0,
     );
     box_(dc, rect(362, 124, 103, 28), 26, BASE, EDGE);
+    let power = battery.map_or_else(|| "—".into(), |v| format!("{v}%"));
+    let accent = if battery.is_some_and(|v| v <= 15) {
+        color(0xffbe78)
+    } else {
+        SUB
+    };
+    box_(dc, rect(275, 125, 77, 26), 10, BASE, EDGE);
+    box_(dc, rect(284, 133, 16, 10), 2, BASE, accent);
+    fill(dc, &rect(300, 136, 2, 4), accent);
+    if let Some(v) = battery {
+        fill(
+            dc,
+            &rect(286, 135, (12 * i32::from(v) + 99) / 100, 6),
+            accent,
+        );
+    }
+    txt(dc, &power, rect(304, 126, 42, 24), accent, 3, DT_CENTER);
     box_(dc, rect(374, 135, 7, 7), 7, chip_color, chip_color);
     txt(dc, chip, rect(386, 126, 70, 24), chip_color, 3, DT_CENTER);
     box_(dc, rect(44, 166, 426, 138), 12, GLASS, EDGE);

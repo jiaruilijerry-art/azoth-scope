@@ -77,6 +77,7 @@ pub const TITLE_H: usize = 32;
 pub struct Legend {
     pub first: String,
     pub second: Option<String>,
+    pub battery: Option<u8>,
 }
 impl Legend {
     pub fn pixels(&self) -> Frame {
@@ -91,6 +92,7 @@ impl Legend {
         } else {
             draw(&mut f, &self.first, 104);
         }
+        battery_badge(&mut f, self.battery);
         f
     }
 }
@@ -214,6 +216,28 @@ fn dot(f: &mut [u8], x: i32, y: i32, v: u8) {
         f[y as usize * W + x as usize] = v;
     }
 }
+pub fn battery_badge(f: &mut [u8], battery: Option<u8>) {
+    let label = battery.map_or_else(|| "--%".to_owned(), |v| format!("{v}%"));
+    let tx = W as i32 - 2 - (label.len() as i32 * 4 - 1);
+    let x = tx - 16;
+    for y in 0..8 {
+        f[y * W + x as usize - 1..(y + 1) * W].fill(0);
+    }
+    for row in 1..=6 {
+        for col in 0..=10 {
+            if row == 1 || row == 6 || col == 0 || col == 10 {
+                dot(f, x + col, row, 170);
+            }
+        }
+    }
+    for y in 3..=4 {
+        dot(f, x + 11, y, 170);
+        for i in 0..(u32::from(battery.unwrap_or(0)) * 7).div_ceil(100) {
+            dot(f, x + 2 + i as i32, y, 255);
+        }
+    }
+    text(f, &label, tx, 2, 1, 255);
+}
 fn line(f: &mut [u8], (mut x, mut y): (i32, i32), (x1, y1): (i32, i32), v: u8) {
     let dx = (x1 - x).abs();
     let dy = -(y1 - y).abs();
@@ -283,7 +307,7 @@ pub fn render(rows: &[(&str, &History)], surface: Surface, window: Window) -> Fr
     for (n, (name, h)) in rows.iter().take(2).enumerate() {
         let top = n as i32 * height;
         let bottom = top + height - 3;
-        let y0 = top + 2;
+        let y0 = top + if n == 0 { 9 } else { 2 }; // top eight scanlines belong to the battery badge
         if n > 0 {
             line(&mut f, (0, top), (207, top), 55);
         }
@@ -347,6 +371,7 @@ mod tests {
             Some(Legend {
                 first: "CPU".into(),
                 second: Some("GPU0".into()),
+                battery: Some(96),
             }),
         ] {
             let f = split_lines(&left, &right, names.as_ref(), Timing::default().window(end));
@@ -381,7 +406,7 @@ mod tests {
             Timing::default().window(end),
         );
         assert_eq!(f[61 * W + 207], 255);
-        assert_eq!(f[2 * W + 202], 255);
+        assert_eq!(f[9 * W + 202], 255);
         assert_ne!(f[31 * W + 205], 255);
     }
     #[test]

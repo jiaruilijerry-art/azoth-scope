@@ -130,6 +130,29 @@ impl Display {
         Err("找不到 M701 OLED 控制通道，请检查 USB / 2.4 GHz 连接".into())
     }
     fn packet(&self, cmd: &[u8]) -> Res<()> {
+        let streamed = cmd.starts_with(&[0x67, 2]);
+        let reply = self.exchange(cmd, if streamed { 10 } else { 1200 }, |_| ())?;
+        if reply.is_some() || streamed {
+            Ok(())
+        } else {
+            Err(format!(
+                "键盘未确认 OLED 指令 {:02X}:{:02X}",
+                cmd[0], cmd[1]
+            ))
+        }
+    }
+    pub fn battery(&self) -> Option<u8> {
+        self.exchange(&[0x12, 1], 220, decode_battery)
+            .ok()
+            .flatten()
+            .flatten()
+    }
+    fn exchange<T>(
+        &self,
+        cmd: &[u8],
+        timeout_ms: u64,
+        decode: impl FnOnce(&[u8]) -> T,
+    ) -> Res<Option<T>> {
         let mut p = [0; 65];
         p[0] = self.id;
         p[1..=cmd.len()].copy_from_slice(cmd);
@@ -140,13 +163,17 @@ impl Display {
         // On our USB M701 the 67:00 mode command is acknowledged, but no
         // per-column-frame 67:02 echo appears on the control collection.
         // Listen briefly for a rejection without restarting the mode on silence.
-        let streamed = cmd.starts_with(&[0x67, 2]);
-        let end = Instant::now() + Duration::from_millis(if streamed { 10 } else { 1200 });
+        let end = Instant::now() + Duration::from_millis(timeout_ms);
         let mut buf = [0; 65];
         while Instant::now() < end {
             let n = self
                 .dev
-                .read_timeout(&mut buf, if streamed { 10 } else { 80 })
+                .read_timeout(
+                    &mut buf,
+                    end.saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .clamp(1, 80) as i32,
+                )
                 .map_err(err)?;
             let mut reply = &buf[..n];
             if self.id != 0 {
@@ -164,17 +191,10 @@ impl Display {
                 2
             };
             if reply.starts_with(&cmd[..k]) {
-                return Ok(());
+                return Ok(Some(decode(reply)));
             }
         }
-        if streamed {
-            Ok(())
-        } else {
-            Err(format!(
-                "键盘未确认 OLED 指令 {:02X}:{:02X}",
-                cmd[0], cmd[1]
-            ))
-        }
+        Ok(None)
     }
     pub fn show(&mut self, f: &[u8], surface: Surface) -> Res<()> {
         if self.streaming.take().is_some() || self.split_active {
@@ -267,6 +287,12 @@ impl Display {
         Ok(())
     }
 }
+fn decode_battery(reply: &[u8]) -> Option<u8> {
+    reply
+        .get(5)
+        .copied()
+        .filter(|v| reply.starts_with(&[0x12, 1]) && *v <= 100)
+}
 fn upload(
     f: &[u8],
     surface: Surface,
@@ -318,6 +344,14 @@ fn pack(f: &[u8], surface: Surface) -> Vec<u8> {
 mod tests {
     use super::*;
     #[test]
+    fn validated_battery_reply() {
+        for (p, want) in [(0, Some(0)), (96, Some(96)), (100, Some(100)), (255, None)] {
+            assert_eq!(decode_battery(&[0x12, 1, 0, 0, 0, p]), want);
+        }
+        assert_eq!(decode_battery(&[0x12, 1, 0, 0]), None);
+        assert_eq!(decode_battery(&[0x67, 1, 0, 0, 0, 96]), None);
+    }
+    #[test]
     fn single_frame_format() {
         let mut f = vec![0; W * Surface::Image.height()];
         f[0] = 255;
@@ -339,7 +373,7 @@ mod tests {
             crate::frame::Timing::default().window(end),
         );
         assert_eq!(f.len(), 208 * 46);
-        assert_eq!((f[2 * 208 + 207], f[43 * 208 + 207]), (255, 255));
+        assert_eq!((f[9 * 208 + 207], f[43 * 208 + 207]), (255, 255));
         for (step, count) in [(60, 80), (59, 82)] {
             let mut packets = vec![];
             upload(&f, Surface::Banner, step, |p| {
